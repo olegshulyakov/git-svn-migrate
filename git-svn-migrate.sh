@@ -1,7 +1,7 @@
 #!/bin/bash
 
-# Copyright 2010-2011 John Albin Wilkins and contributors.
-# Available under the GPL v2 license. See LICENSE.txt.
+# This is done on the basis of John Albin Wilkins code, see [https://github.com/JohnAlbin/git-svn-migrate].
+# Available under the GPL v2 license.
 
 script=`basename $0`;
 dir=`pwd`/`dirname $0`;
@@ -169,77 +169,69 @@ pwd=`pwd`;
 tmp_destination="$pwd/tmp-git-repo";
 mkdir -p "$destination";
 destination=`cd "$destination"; pwd`; #Absolute path.
+log_file="$destination/git.svn.$(date +%Y%m%d).log"
 
 # Ensure temporary repository location is empty.
 if [[ -e $tmp_destination ]]; then
-  echo "Temporary repository location \"$tmp_destination\" already exists. Exiting." >&2;
+  echo "Temporary repository location \"$tmp_destination\" already exists. Exiting." | tee -a "$log_file";
   exit 1;
 fi
 while read line
 do
   # Check for 2-field format:  Name [tab] URL
   name=`echo $line | awk '{print $1}'`;
-  url=`echo $line | awk '{print $2}'`;
+  svn_url=`echo $line | awk '{print $2}'`;
   # Check for simple 1-field format:  URL
-  if [[ $url == '' ]]; then
-    url=$name;
-    name=`basename $url`;
+  if [[ $svn_url == '' ]]; then
+    svn_url=$name;
+    name=`basename $svn_url`;
   fi
-  # Process each Subversion URL.
-  echo >&2;
-  echo "At $(date)..." >&2;
-  echo "Processing \"$name\" repository at $url..." >&2;
 
-  # Init the final bare repository.
-  mkdir "$destination/$name.git";
-  cd "$destination/$name.git";
-  git init --bare $gitinit_params;
-  git symbolic-ref HEAD refs/heads/trunk;
+  # Process each Subversion URL.
+  echo "$(date) - Processing \"$name\" repository at $svn_url..." | tee -a "$log_file";
 
   # Clone the original Subversion repository to a temp repository.
   cd "$pwd";
-  echo "- Cloning repository..." >&2;
-  git svn clone "$url" -A "$authors_file" --authors-prog="$dir/svn-lookup-author.sh" --stdlayout --quiet $gitsvn_params "$tmp_destination";
+  echo "$(date) - Cloning repository..." | tee -a "$log_file";
+  git svn clone "$svn_url" -A "$authors_file" --authors-prog="$dir/svn-lookup-author.sh" --stdlayout --quiet $gitsvn_params "$tmp_destination" | tee -a "$log_file";
 
-  # Create .gitignore file.
-  echo "- Converting svn:ignore properties into a .gitignore file..." >&2;
-  if [[ $ignore_file != '' ]]; then
-    cp "$ignore_file" "$tmp_destination/.gitignore";
-  fi
-  cd "$tmp_destination";
-  git svn show-ignore --id trunk >> .gitignore;
-  git add .gitignore;
-  git commit --author="git-svn-migrate <nobody@example.org>" -m 'Convert svn:ignore properties to .gitignore.';
-
-  # Push to final bare repository and remove temp repository.
-  echo "- Pushing to new bare repository..." >&2;
-  git remote add bare "$destination/$name.git";
-  git config remote.bare.push 'refs/remotes/*:refs/heads/*';
-  git push bare;
-  # Push the .gitignore commit that resides on master.
-  git push bare master:trunk;
-  cd "$pwd";
-  rm -r "$tmp_destination";
-
-  # Rename Subversion's "trunk" branch to Git's standard "master" branch.
-  cd "$destination/$name.git";
-  git branch -M trunk master;
+  # Check latest log message
+  cd "$tmp_destination"
+  last_message=`git log -1`
+  echo "$(date) - Latest revision $last_message" | tee -a "$log_file";
 
   # Remove bogus branches of the form "name@REV".
-  git for-each-ref --format='%(refname)' refs/heads | grep '@[0-9][0-9]*' | cut -d / -f 3- |
+  git for-each-ref --format='%(refname)' refs/remotes/origin | grep '@[0-9][0-9]*' | cut -d / -f 4- |
   while read ref
   do
-    git branch -D "$ref";
+    git branch -Dr "origin/$ref" | tee -a "$log_file";
   done
 
-  # Convert git-svn tag branches to proper tags.
-  echo "- Converting svn tag directories to proper git tags..." >&2;
-  git for-each-ref --format='%(refname)' refs/heads/tags | cut -d / -f 4 |
+  # Convert git-svn tags to proper tags.
+  echo "$(date) - Converting svn tags to proper git tags..." | tee -a "$log_file";
+  git for-each-ref --format='%(refname)' refs/remotes/origin/tags | cut -d / -f 5 |
   while read ref
   do
     git tag -a "$ref" -m "Convert \"$ref\" to a proper git tag." "refs/heads/tags/$ref";
-    git branch -D "tags/$ref";
+    git branch -Dr "origin/tags/$ref" | tee -a "$log_file";
   done
 
-  echo "- Conversion completed at $(date)." >&2;
+  # Convert git-svn branches to proper branches.
+  echo "$(date) - Converting svn branches to proper git branches..." | tee -a "$log_file";
+  git for-each-ref --format='%(refname)' refs/remotes/origin | cut -d / -f 4 |
+  while read ref
+  do
+    if [[ "$ref" == "trunk" ]]; then
+      continue;
+    fi
+
+    git branch -f "$ref" "origin/$ref" | tee -a "$log_file";
+  done
+
+  cd "$pwd"
+  # Move temp repository to final name
+  echo "$(date) - Rename from $tmp_destination to $destination/$name.git..." | tee -a "$log_file";
+  mv -f "$tmp_destination" "$destination/$name.git" | tee -a "$log_file";
+
+  echo "$(date) - Conversion completed at $(date)." | tee -a "$log_file";
 done < "$url_file"
